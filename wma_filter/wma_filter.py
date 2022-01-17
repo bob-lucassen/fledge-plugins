@@ -13,8 +13,6 @@ import time
 import copy
 import logging
 
-import numpy as np
-
 from fledge.common import logger
 import filter_ingest
 
@@ -72,6 +70,10 @@ def plugin_info():
         'config': _DEFAULT_CONFIG
     }
 
+def reset_handle(handle):
+    handle['xmean'] = 0
+    handle['window'] = [0]*int(config['filter_time']['value'])
+    handle['counter'] = 0
 
 def plugin_init(config, ingest_ref, callback):
     """ Initialise the plugin
@@ -85,25 +87,13 @@ def plugin_init(config, ingest_ref, callback):
     """
     handle = copy.deepcopy(config)
 
-    handle['the_callback'] = callback
-    handle['the_ingest_ref'] = ingest_ref
+    handle['callback'] = (callback, ingest_ref)
     # plugin shutdown indicator
     handle['shutdown_in_progress'] = False
-    # datapoint name
-    handle['datapoint'] = config['datapoint']['value']  
 
     _LOGGER.debug("plugin_init for filter WMA called")
-    
-    # window size
-    wsize = int(config['filter_time']['value'])
-    handle['wsize'] = wsize
-    # wma
-    handle['xmean'] = 0
-    # window
-    handle['window'] = np.zeros(wsize)
-    # counter 
-    handle['counter'] = 0
-    
+
+    reset_handle(handle)
     return handle
 
 
@@ -114,27 +104,21 @@ def compute_wma(handle, reading):
         A reading data
     """
     
-    wsize = handle['wsize']
+    wsize = len(handle['window'])
     xmean = handle['xmean']
     window = handle['window']
     
-    for attribute in list(reading):
-        elem = reading[attribute]      
-        xlast = window[wsize-1]      
-        frame = window[0:wsize-1]
-        window[1:]=frame
-        window[0] = elem
-        xfirst = window[0]
-        xsum = wsize*xmean + xfirst - xlast
-        xmean = xsum/wsize
-        handle['counter'] = handle['counter'] + 1
-        reading[handle['datapoint']] = xmean
-        handle['xmean'] = xmean
-        handle['window'] = window
-        #wma = np.mean(window)
-        #reading[datapoint] = wma
+    # misschien om te controleren, volgens mij is dit altijd precies één waarde
+    # attribute == 'sinus', als dat is dan weet je wel!
+    elem = list(values(reading))[0]
 
-
+    rot = handle['counter'] % wsize
+    xlast = window[rot]
+    window[rot] = elem
+    xmean = (wsize*xmean + elem - xlast)/wsize
+    
+    handle['counter'] += 1
+    handle['xmean'] = reading[handle['datapoint']['value']] = xmean
 
 def plugin_reconfigure(handle, new_config):
     """ Reconfigures the plugin
@@ -147,23 +131,10 @@ def plugin_reconfigure(handle, new_config):
     """
     
     _LOGGER.debug("Old config for wma plugin {} \n new config {}".format(handle, new_config))
-    new_handle = copy.deepcopy(new_config)
-     
-    _LOGGER.debug("plugin_init for filter WMA called")
-    
-    new_handle['datapoint'] = new_config['datapoint']['value']
-    
-    wsize = int(new_config['filter_time']['value'])
-    new_handle['wsize'] = wsize
-    # wma
-    new_handle['xmean'] = 0
-    # window
-    new_handle['window'] = np.zeros(wsize)
-    # counter 
-    new_handle['counter'] = 0
-    
-    return new_handle
 
+    new_handle = reset_handle(copy.deepcopy(new_config))
+    new_handle['callback'] = handle['callback']
+    return new_handle
 
 def plugin_shutdown(handle):
     """ Shutdowns the plugin doing required cleanup.
@@ -192,7 +163,7 @@ def plugin_ingest(handle, data):
 
     if handle['enable']['value'] == 'false':
         # Filter not enabled, just pass data onwards
-        filter_ingest.filter_ingest_callback(handle['the_callback'], handle['the_ingest_ref'], data)
+        filter_ingest.filter_ingest_callback(*handle['callback'], data)
         return
 
     # Filter is enabled: compute WMA for each reading
@@ -200,8 +171,8 @@ def plugin_ingest(handle, data):
         compute_wma(handle, elem['readings'])
 
     # Pass data onwards
-    if handle['counter'] > handle['wsize'] -1:
-    	filter_ingest.filter_ingest_callback(handle['the_callback'], handle['the_ingest_ref'], data)
+    if handle['counter'] > len(handle['window']) - 1:
+    	filter_ingest.filter_ingest_callback(*handle['callback'], data)
     	handle['counter'] = 0
 
     _LOGGER.debug("wma filter_ingest done")
